@@ -375,28 +375,11 @@ func vscodeKindAt(k vscodeKind, dir string) *Agent {
 	// setGroup writes magpie's group in the default's and each profile's,
 	// for the provider the chat installed has, in place of one written
 	// for the other
+	setGroupWith := func(lms []string, force bool) error {
+		return vscodeSetGroup(k, models, lms, force)
+	}
 	setGroup := func(lms []string) error {
-		vendor := k.chat().vendor
-		v := vscodeGroupJSON(k, vendor)
-		for _, lm := range append([]string{models}, lms...) {
-			for _, other := range vscodeVendors {
-				if other != vendor {
-					if err := edit.DelJSONItem(lm, vscodeGroupOf(other)); err != nil {
-						return err
-					}
-				}
-			}
-			var want any = v
-			if cur, ok := edit.GetJSONItem(lm, vscodeGroupOf(vendor)); ok {
-				if want = vscodeGroupKept(cur, v); sameJSON(cur, want) {
-					continue
-				}
-			}
-			if err := edit.SetJSONItem(lm, vscodeGroupOf(vendor), want); err != nil {
-				return err
-			}
-		}
-		return nil
+		return setGroupWith(lms, false)
 	}
 	return atomic(&Agent{
 		ID: k.id, Name: k.name, Icon: "vscode", Aliases: k.aliases, Spelled: prefixed,
@@ -435,6 +418,7 @@ func vscodeKindAt(k vscodeKind, dir string) *Agent {
 					forget(key(p))
 				}
 				for _, lm := range append([]string{models}, lms...) {
+					forget(vscodeAPIsWantedKey(lm))
 					for _, v := range vscodeVendors {
 						if err := edit.DelJSONItem(lm, vscodeGroupOf(v)); err != nil {
 							return err
@@ -462,13 +446,14 @@ func vscodeKindAt(k vscodeKind, dir string) *Agent {
 				return k.name + "'s Copilot Chat " + c.version + " lists a group for " + c.vendor + " and magpie's is for " + vendor + "; magpie writes it again when it next starts"
 			}
 			header, want := "requestHeaders.Authorization", "Bearer "+k.token()
+			wantURL := vscodeCheckURL(g, vendor)
 			if vendor == vscodeOAI {
 				header, want = "requestHeaders.x-api-key", k.token()
 			}
 			return wiringOff(k.name, models, func(k string) (string, bool) {
 				r := gjson.Get(g, "models.0."+k)
 				return r.String(), r.Exists()
-			}, "url", vscodeURL(), header, want)
+			}, "url", wantURL, header, want)
 		},
 		Fields: []Field{{
 			Key: "model", Label: "model", Get: model,
@@ -516,7 +501,7 @@ func vscodeKindAt(k vscodeKind, dir string) *Agent {
 				}
 				return withVia(group(k.name, own), k.id, magpieID+"/")
 			},
-		}},
+		}, vscodeProtocolField(k, joined, setGroupWith, profiles)},
 	}, path, models, stashPath())
 }
 
@@ -620,43 +605,12 @@ func vscodeURL() string { return gatewayV1() + "/chat/completions" }
 // provider (vscodeEndpoint or vscodeOAI): the catalog as the chat of the VS
 // Code k is shown it.
 func vscodeGroupJSON(k vscodeKind, vendor string) map[string]any {
-	list := []any{}
-	for _, m := range sharedModels(k.id) {
-		context := m.Context
-		if context == 0 {
-			context = unknownWindow(128000) // what VS Code takes a model of unknown window for
-		}
-		// VS Code keeps the output budget out of the window it fills with
-		// the prompt, so a model whose output limit is near its window
-		// would leave the prompt next to no room
-		output := maxTokens(m)
-		if output <= 0 {
-			output = 8192
-		}
-		output = outputOr(m, min(output, context/4))
-		entry := map[string]any{
-			"id": m.ID, "name": m.Name, "url": vscodeURL(),
-			"toolCalling": true, "vision": m.Images,
-			"contextWindow": context, "maxOutputTokens": output,
-			"requestHeaders": map[string]string{"Authorization": "Bearer " + k.token()},
-		}
-		if vendor == vscodeOAI {
-			// its window is maxInputTokens plus maxOutputTokens, and an
-			// Authorization of the model's own is dropped
-			delete(entry, "contextWindow")
-			entry["maxInputTokens"] = context - output
-			entry["requestHeaders"] = map[string]string{"x-api-key": k.token()}
-		}
-		if len(m.Efforts) > 0 {
-			entry["supportsReasoningEffort"] = m.Efforts
-			entry["reasoningEffortFormat"] = "chat-completions"
-		}
-		list = append(list, entry)
-	}
+	catalogModels := sharedModels(k.id)
 	if vendor == vscodeOAI {
-		return map[string]any{"name": magpieID, "vendor": vscodeOAI, "models": list}
+		return vscodeBuildOAIGroup(k, catalogModels)
 	}
-	return map[string]any{"name": magpieID, "vendor": vscodeEndpoint, "apiType": "chat-completions", "models": list}
+	v, _ := vscodeBuildEndpointGroup(k, catalogModels, "", "", false, true)
+	return v
 }
 
 // vscodeGroupKept is magpie's group v laid over the one in the file, cur,
