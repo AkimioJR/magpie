@@ -382,6 +382,18 @@ func TestCodexBodyDropsPromptCacheOptions(t *testing.T) {
 	}
 }
 
+// #6407: Copilot Chat injects truncation ("disabled"/"auto") on every
+// Responses request; the ChatGPT Codex backend rejects it, so codexBody drops it.
+func TestCodexBodyDropsTruncation(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	var m map[string]any
+	json.Unmarshal(codexBody([]byte(`{"model":"gpt-5.5","truncation":"disabled","input":"hi"}`)), &m)
+	if _, ok := m["truncation"]; ok {
+		t.Errorf("truncation sent: %v", m)
+	}
+}
+
 // A message's status goes with its id, and Codex's reasoning items carry
 // none, so both lose it with the id (Doby on Discord: Pi's assistant
 // message sent again with status "completed" was refused 400 "Unknown

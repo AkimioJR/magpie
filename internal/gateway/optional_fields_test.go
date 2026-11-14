@@ -148,7 +148,7 @@ func TestOptionalFieldMixedValidation(t *testing.T) {
 }
 
 func TestRefusedOptionalNamesOnlyUnsupportedFields(t *testing.T) {
-	request := []byte(`{"store":false,"metadata":{"session":"synthetic"},"service_tier":"default","prompt_cache_retention":"24h","prompt_cache_options":{"mode":"explicit"},"thinking":{"type":"enabled"}}`)
+	request := []byte(`{"store":false,"metadata":{"session":"synthetic"},"service_tier":"default","prompt_cache_retention":"24h","prompt_cache_options":{"mode":"explicit"},"truncation":"disabled","thinking":{"type":"enabled"}}`)
 	for _, tt := range []struct {
 		name, reply string
 		status      int
@@ -179,6 +179,7 @@ func TestRefusedOptionalNamesOnlyUnsupportedFields(t *testing.T) {
 		{"root-location", `{"detail":[{"type":"extra_forbidden","loc":["store"],"msg":"Extra inputs are not permitted"}]}`, 422, []string{"store"}},
 		{"unsupported-code", `{"error":{"message":"Not accepted here","code":"unsupported_parameter","param":"store"}}`, 400, []string{"store"}},
 		{"codex-unquoted-unsupported-parameter", `{"code":null,"message":"Codex: Unsupported parameter: prompt_cache_retention","param":null,"type":"invalid_request_error"}`, 400, []string{"prompt_cache_retention"}},
+		{"unsupported-truncation", `{"error":{"message":"Unsupported parameter: 'truncation'","type":"invalid_request_error","param":"truncation","code":"unsupported_parameter"}}`, 400, []string{"truncation"}},
 		// the ChatGPT backend's, as it gave it on 2026-10-14 (#2154)
 		{"openai-bare-name", `{"error":{"message":"prompt_cache_options is not supported on this model","type":"invalid_request_error","param":"prompt_cache_options","code":"invalid_parameter"}}`, 400, []string{"prompt_cache_options"}},
 		// a relay's Chinese refusal (基元律动, ldl123292 on X)
@@ -315,5 +316,39 @@ func TestServiceTierRefusedForTheValueRetried(t *testing.T) {
 	}
 	if srv.fits("fake", tierField, provider.Responses) {
 		t.Errorf("the tier not remembered unfit for the provider")
+	}
+}
+
+// #6407: Copilot Chat injects truncation ("disabled"/"auto") on every
+// Responses request; an upstream that refuses it is retried without it and
+// remembered unfit so later turns go straight through.
+func TestTruncationRefusedRetried(t *testing.T) {
+	f := &fake{t: t, reply: optionalFieldReply(provider.Responses)}
+	f.refuse = func(b []byte) (int, string) {
+		var v map[string]json.RawMessage
+		json.Unmarshal(b, &v)
+		if _, present := v["truncation"]; present {
+			return 400, `{"error":{"message":"Unsupported parameter: 'truncation'","type":"invalid_request_error","param":"truncation","code":"unsupported_parameter"}}`
+		}
+		return 0, ""
+	}
+	setup(t, provider.Responses, f)
+	srv := New()
+	path, body := optionalFieldAsk(provider.Responses)
+	request := string(withFields([]byte(body), map[string]any{"truncation": "disabled", "metadata": map[string]string{"session": "synthetic"}}))
+	for turn, want := range []int{2, 1} {
+		calls := f.calls
+		code, reply := postTo(t, srv, path, request)
+		if code != 200 || f.calls-calls != want {
+			t.Fatalf("turn %d: %d after %d calls, want %d: %s", turn+1, code, f.calls-calls, want, reply)
+		}
+		var sent map[string]json.RawMessage
+		json.Unmarshal(f.got, &sent)
+		if sent["truncation"] != nil || sent["metadata"] == nil {
+			t.Errorf("turn %d: truncation kept or unrelated metadata lost: %s", turn+1, f.got)
+		}
+	}
+	if srv.fits("fake", "truncation", provider.Responses) {
+		t.Errorf("truncation not remembered unfit for the provider")
 	}
 }

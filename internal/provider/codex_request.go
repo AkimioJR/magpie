@@ -318,7 +318,7 @@ func codexBody(body []byte) []byte {
 	// supported on this model", 400, tried 2026-10-14 on gpt-5.5,
 	// gpt-5.6-sol, gpt-6-sol, gpt-6-astra and gpt-6-luna, #2154); its
 	// cache follows the session-id header instead (#1473)
-	for _, k := range []string{"max_output_tokens", "max_completion_tokens", "temperature", "top_p", "previous_response_id", "user", "safety_identifier", "prompt_cache_options"} {
+	for _, k := range []string{"max_output_tokens", "max_completion_tokens", "temperature", "top_p", "previous_response_id", "user", "safety_identifier", "prompt_cache_options", "truncation"} {
 		delete(m, k)
 	}
 	// Codex's Fast mode sends "priority", its Ultrafast "ultrafast"; any
