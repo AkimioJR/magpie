@@ -15,6 +15,8 @@ func subagentAgents(t *testing.T, h string) map[string]string {
 	write(t, filepath.Join(h, ".qwen/settings.json"), "{}\n")
 	write(t, filepath.Join(h, ".factory/settings.json"), "")
 	write(t, filepath.Join(h, ".grok/config.toml"), "")
+	// ZCode is a desktop app found by its config: no CLI beside the folder
+	write(t, filepath.Join(h, ".zcode/v2/config.json"), "{}\n")
 	return map[string]string{
 		"claude":   filepath.Join(h, ".claude/agents/reviewer.md"),
 		"codex":    filepath.Join(h, ".codex/agents/reviewer.toml"),
@@ -25,6 +27,7 @@ func subagentAgents(t *testing.T, h string) map[string]string {
 		"grok":     filepath.Join(h, ".grok/agents/reviewer.md"),
 		"cursor":   filepath.Join(h, ".cursor/agents/reviewer.md"),
 		"copilot":  filepath.Join(h, ".copilot/agents/reviewer.agent.md"),
+		"zcode":    filepath.Join(h, ".zcode/agents/reviewer.md"),
 	}
 }
 
@@ -60,7 +63,7 @@ func TestSubagentsEachAgentsFile(t *testing.T) {
 		"opencode": "---\ndescription: " + desc + "\nmode: subagent\n" + body,
 		"droid":    "---\nname: \"reviewer\"\ndescription: " + desc + "\nmcpServers: [\"github\"]\n" + body,
 	}
-	for _, id := range []string{"gemini", "qwen", "grok", "cursor", "copilot"} {
+	for _, id := range []string{"gemini", "qwen", "grok", "cursor", "copilot", "zcode"} {
 		want[id] = "---\nname: \"reviewer\"\ndescription: " + desc + "\n" + body
 	}
 	for id, f := range files {

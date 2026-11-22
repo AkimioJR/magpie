@@ -36,6 +36,7 @@ import (
 //	Grok Build      <grok home>/agents/<name>.md       name, description
 //	Cursor          ~/.cursor/agents/<name>.md         name, description
 //	Copilot CLI     <copilot home>/agents/<name>.agent.md  name, description
+//	ZCode           ~/.zcode/agents/<name>.md          name, description
 //
 // Only Claude Code takes a subagent's skills, and only Claude Code and
 // Droid its servers by name; every other agent's subagents use whatever
@@ -97,7 +98,7 @@ const (
 
 // SubagentAgents are the agents a subagent can be given, in the order the
 // page lists them.
-var SubagentAgents = []string{"claude", "codex", "opencode", "gemini", "qwen", "droid", "grok", "cursor", "copilot"}
+var SubagentAgents = []string{"claude", "codex", "opencode", "gemini", "qwen", "droid", "grok", "cursor", "copilot", "zcode"}
 
 // subagentSpec is where an agent keeps its subagents and how it reads one.
 type subagentSpec struct {
@@ -177,6 +178,12 @@ func subagentSpecOf(t *Target) (*subagentSpec, string) {
 		sp := md(filepath.Join(d, "agents"), plain)
 		sp.ext = ".agent.md"
 		return sp, ""
+	case "zcode":
+		// ZCode reads user-wide subagents from ~/.zcode/agents (HOME first
+		// on Windows too, as its skills and AGENTS.md do) and takes the
+		// frontmatter's name and description, the prompt below; frontmatter
+		// it doesn't know it ignores
+		return md(filepath.Join(appdir.ZCodeHome(h), ".zcode", "agents"), plain), ""
 	}
 	return nil, "magpie can't give " + a.Name + " subagents: it reads none from a folder of its own"
 }
