@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -37,6 +38,7 @@ import (
 //	Cursor          ~/.cursor/agents/<name>.md         name, description
 //	Copilot CLI     <copilot home>/agents/<name>.agent.md  name, description
 //	ZCode           ~/.zcode/agents/<name>.md          name, description
+//	DeepSeek Harness  home patch list                  an agent-preset row: id, description, a persona row with the prompt
 //
 // Only Claude Code takes a subagent's skills, and only Claude Code and
 // Droid its servers by name; every other agent's subagents use whatever
@@ -98,7 +100,7 @@ const (
 
 // SubagentAgents are the agents a subagent can be given, in the order the
 // page lists them.
-var SubagentAgents = []string{"claude", "codex", "opencode", "gemini", "qwen", "droid", "grok", "cursor", "copilot", "zcode"}
+var SubagentAgents = []string{"claude", "codex", "opencode", "gemini", "qwen", "droid", "grok", "cursor", "copilot", "zcode", "dsh"}
 
 // subagentSpec is where an agent keeps its subagents and how it reads one.
 type subagentSpec struct {
@@ -108,7 +110,10 @@ type subagentSpec struct {
 	// without uses all the agent has. model: it names the subagent's
 	// model; one without runs it on the model the agent picks
 	skills, mcp, model bool
-	render             func(s *Subagent, skills, mcp []string) []byte
+	// dsh: no file of its own per subagent, but a marked row in dsh's home
+	// patch list (agent.DshPutPreset); syncSubagents goes the row way then
+	dsh    bool
+	render func(s *Subagent, skills, mcp []string) []byte
 }
 
 func (sp *subagentSpec) path(name string) string { return filepath.Join(sp.dir, name+sp.ext) }
@@ -184,6 +189,14 @@ func subagentSpecOf(t *Target) (*subagentSpec, string) {
 		// frontmatter's name and description, the prompt below; frontmatter
 		// it doesn't know it ignores
 		return md(filepath.Join(appdir.ZCodeHome(h), ".zcode", "agents"), plain), ""
+	case "dsh":
+		// dsh takes its subagents as agent presets, rows of its home patch
+		// list (agent/dsh_subagents.go), not files of their own; 0.1.7
+		// brought the preset row, an older one is given none
+		if ok, why := agent.DshPresetsOK(a); !ok {
+			return nil, why
+		}
+		return &subagentSpec{dir: agent.DshPresetFile(a.Dir), dsh: true}, ""
 	}
 	return nil, "magpie can't give " + a.Name + " subagents: it reads none from a folder of its own"
 }
@@ -261,8 +274,12 @@ func (s *Subagent) check() error {
 		return fmt.Errorf("subagent model %q: a model's id, without spaces, of at most %d bytes", s.Model, maxSubagentModel)
 	}
 	for _, a := range s.Agents {
-		if base, _, _ := strings.Cut(a, "@wsl:"); !slices.Contains(SubagentAgents, base) {
+		base, _, _ := strings.Cut(a, "@wsl:")
+		if !slices.Contains(SubagentAgents, base) {
 			return fmt.Errorf("%s can't be given subagents", a)
+		}
+		if base == "dsh" && !agent.DshPresetNameOK(s.Name) {
+			return fmt.Errorf("subagent name %q: dsh's preset ids take 1 to 32 lowercase letters, digits and -, starting with a letter, and not lead", s.Name)
 		}
 	}
 	return nil
@@ -317,11 +334,99 @@ func (l *Library) syncSubagents(t *Target, b *backups, res *Result) {
 		}
 		return
 	}
+	if sp.dsh {
+		l.syncDshSubagents(t, a, want, b, res)
+		return
+	}
 	files := make([]ownFile, len(want))
 	for i, s := range want {
 		files[i] = ownFile{name: s.Name, path: sp.path(s.Name), body: func() []byte { return l.renderSubagent(sp, s) }}
 	}
 	a.Subagents = syncOwnFiles(t, "subagent", a.Subagents, files, b, res)
+}
+
+// syncDshSubagents writes each wanted subagent's preset row into dsh's
+// home patch list (agent.DshPutPreset), and takes magpie's row out for
+// one wanted no more (agent.DshDropPreset), by the discipline the files
+// go by (syncOwnFiles): a row still as magpie wrote it (its hash) is
+// magpie's to rewrite or remove, one the user changed is theirs from then
+// on, and a row of magpie's row id that isn't magpie's is never touched,
+// a problem.
+func (l *Library) syncDshSubagents(t *Target, a *Applied, want []*Subagent, b *backups, res *Result) {
+	id := t.Agent.ID
+	f := agent.DshPresetFile(t.Agent.Dir)
+	had := map[string]SubagentFile{}
+	for _, x := range a.Subagents {
+		had[x.Name] = x
+	}
+	wanted := map[string]bool{}
+	var kept []SubagentFile
+	write := func(s *Subagent) bool {
+		if err := b.keep(id, f); err != nil {
+			res.fail(id, "subagent:"+s.Name, err)
+			return false
+		}
+		if err := agent.DshPutPreset(t.Agent.Dir, s.Name, s.Description, s.Prompt); err != nil {
+			res.fail(id, "subagent:"+s.Name, err)
+			return false
+		}
+		res.changed(id)
+		return true
+	}
+	for _, s := range want {
+		wanted[s.Name] = true
+		body := agent.DshPresetBody(s.Name, s.Description, s.Prompt)
+		cur, ours, err := agent.DshPresetRow(t.Agent.Dir, s.Name)
+		switch {
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			res.fail(id, "subagent:"+s.Name, err)
+			continue
+		case len(cur) == 0:
+			// no row of the id: written
+		case !ours:
+			res.fail(id, "subagent:"+s.Name, fmt.Errorf("%s's patch list already has a preset row of magpie's id, which magpie leaves as it is", t.Agent.Name))
+			continue
+		case subagentHash(cur) == subagentHash(body):
+			// the same as magpie would write
+		case had[s.Name].Hash != "" && subagentHash(cur) == had[s.Name].Hash:
+			// magpie's own, to rewrite
+		default:
+			res.fail(id, "subagent:"+s.Name, fmt.Errorf("%s's preset row for %s says other than what magpie last wrote there, so it is the user's and magpie leaves it as it is", t.Agent.Name, s.Name))
+			continue
+		}
+		if len(cur) == 0 || !bytes.Equal(cur, body) {
+			if !write(s) {
+				if had[s.Name].Hash != "" {
+					kept = append(kept, had[s.Name])
+				}
+				continue
+			}
+		}
+		kept = append(kept, SubagentFile{Name: s.Name, Path: f, Hash: subagentHash(body)})
+	}
+	for name, x := range had {
+		if wanted[name] {
+			continue
+		}
+		if err := b.keep(id, f); err != nil {
+			res.fail(id, "subagent:"+name, err)
+			kept = append(kept, x)
+			continue
+		}
+		if err := agent.DshDropPreset(t.Agent.Dir, name, x.Hash); err != nil {
+			res.fail(id, "subagent:"+name, err)
+			kept = append(kept, x)
+			continue
+		}
+		res.changed(id)
+	}
+	slices.SortFunc(kept, func(x, y SubagentFile) int {
+		if c := strings.Compare(x.Path, y.Path); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Name, y.Name)
+	})
+	a.Subagents = kept
 }
 
 // ownFile is a file of its own magpie wants an agent to have, for the

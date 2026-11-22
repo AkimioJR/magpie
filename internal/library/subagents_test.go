@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // subagentAgents puts every agent that takes subagents in the sandbox.
@@ -17,6 +19,10 @@ func subagentAgents(t *testing.T, h string) map[string]string {
 	write(t, filepath.Join(h, ".grok/config.toml"), "")
 	// ZCode is a desktop app found by its config: no CLI beside the folder
 	write(t, filepath.Join(h, ".zcode/v2/config.json"), "{}\n")
+	// dsh takes a preset row in its home patch list, not a file of its own;
+	// its CLI beside the folder says the version the presets came with
+	testenv.Program(t, filepath.Join(h, "bin", "dsh"), "#!/bin/sh\necho 0.2.1\n")
+	write(t, filepath.Join(h, "bin", "dsh.exe"), "")
 	return map[string]string{
 		"claude":   filepath.Join(h, ".claude/agents/reviewer.md"),
 		"codex":    filepath.Join(h, ".codex/agents/reviewer.toml"),
@@ -28,6 +34,7 @@ func subagentAgents(t *testing.T, h string) map[string]string {
 		"cursor":   filepath.Join(h, ".cursor/agents/reviewer.md"),
 		"copilot":  filepath.Join(h, ".copilot/agents/reviewer.agent.md"),
 		"zcode":    filepath.Join(h, ".zcode/agents/reviewer.md"),
+		"dsh":      filepath.Join(h, ".dsh/cordis.patch.yml"),
 	}
 }
 
@@ -79,6 +86,21 @@ func TestSubagentsEachAgentsFile(t *testing.T) {
 			}
 			continue
 		}
+		if id == "dsh" {
+			// its preset row in the home patch list, magpie's by its mark
+			for _, piece := range []string{
+				"- id: preset-magpie-reviewer # magpie",
+				"name: '@deepseek-ai/dsh-agent-preset'",
+				"    id: reviewer",
+				"      - name: '@deepseek-ai/dsh-persona'",
+				"You review code.",
+			} {
+				if !strings.Contains(got, piece) {
+					t.Errorf("dsh's patch list misses %q:\n%s", piece, got)
+				}
+			}
+			continue
+		}
 		if got != want[id] {
 			t.Errorf("%s's %s:\n%s\nwant:\n%s", id, f, got, want[id])
 		}
@@ -99,6 +121,14 @@ func TestSubagentsEachAgentsFile(t *testing.T) {
 	// taken from one agent: its file goes, the others stay
 	ok(t)(SubagentAgentsSet("reviewer", []string{"claude", "codex"}))
 	for id, f := range files {
+		if id == "dsh" {
+			// the patch list stays (dsh wants a list, even an empty one):
+			// magpie's row goes
+			if got := read(t, f); strings.Contains(got, "preset-magpie-reviewer") {
+				t.Errorf("dsh's row after untick:\n%s", got)
+			}
+			continue
+		}
 		_, err := os.Stat(f)
 		if gone := os.IsNotExist(err); gone != (id != "claude" && id != "codex") {
 			t.Errorf("%s's file after untick: %v", id, err)
@@ -273,5 +303,89 @@ func TestSubagentModelGoesToCodex(t *testing.T) {
 		if _, err := SaveSubagent("reviewer", s); err == nil {
 			t.Errorf("model %q saved", m)
 		}
+	}
+}
+
+// dsh's row goes by the rows' own discipline: a row of magpie's row id
+// that the user wrote is never touched, a problem; one magpie wrote that
+// the user changed is theirs from then on; unticking takes magpie's own
+// out. A name dsh's preset ids don't take is refused for dsh alone.
+func TestSubagentsDshRows(t *testing.T) {
+	h := sandbox(t)
+	files := subagentAgents(t, h)
+	patch := files["dsh"]
+
+	// a row of the id magpie would write, the user's own: left, a problem
+	write(t, patch, strings.Join([]string{
+		"- id: preset-magpie-reviewer",
+		"  name: '@deepseek-ai/dsh-agent-preset'",
+		"  config:",
+		"    id: reviewer",
+		"",
+	}, "\n"))
+	s := reviewer
+	s.Agents = []string{"dsh"}
+	res, err := SaveSubagent("", s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Problems) != 1 || res.Problems[0].Agent != "dsh" {
+		t.Fatalf("problems: %+v", res.Problems)
+	}
+	if got := read(t, patch); !strings.Contains(got, "    id: reviewer") || strings.Contains(got, "# magpie") {
+		t.Errorf("the user's row was touched:\n%s", got)
+	}
+
+	// their row under its own id, and magpie's beside it
+	write(t, patch, strings.Join([]string{
+		"- id: preset-theirs",
+		"  name: '@deepseek-ai/dsh-agent-preset'",
+		"  config:",
+		"    id: theirs",
+		"",
+	}, "\n"))
+	res, err = SaveSubagent("reviewer", s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Problems) != 0 {
+		t.Fatalf("problems: %+v", res.Problems)
+	}
+	got := read(t, patch)
+	if !strings.Contains(got, "- id: preset-magpie-reviewer # magpie") || !strings.Contains(got, "id: preset-theirs") {
+		t.Errorf("the rows:\n%s", got)
+	}
+
+	// the user edits magpie's row; a change in the library leaves it as
+	// the user has it
+	write(t, patch, strings.Replace(got, "You review code.", "The user's own edit.", 1))
+	s.Prompt = "You review code, twice."
+	res, err = SaveSubagent("reviewer", s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Problems) != 1 || res.Problems[0].Agent != "dsh" {
+		t.Fatalf("problems: %+v", res.Problems)
+	}
+	if got = read(t, patch); !strings.Contains(got, "The user's own edit.") {
+		t.Errorf("the user's edit went:\n%s", got)
+	}
+
+	// unticked: magpie's row is the user's now, and stays
+	ok(t)(SubagentAgentsSet("reviewer", nil))
+	if got = read(t, patch); !strings.Contains(got, "preset-magpie-reviewer") {
+		t.Errorf("the user's row was taken:\n%s", got)
+	}
+
+	// a name dsh's preset ids don't take is refused for dsh alone
+	s.Name = "2fast"
+	s.Prompt = "You review code."
+	s.Agents = []string{"dsh"}
+	if _, err := SaveSubagent("", s); err == nil {
+		t.Error("2fast saved for dsh")
+	}
+	s.Agents = []string{"claude"}
+	if _, err := SaveSubagent("", s); err != nil {
+		t.Errorf("2fast for claude: %v", err)
 	}
 }
